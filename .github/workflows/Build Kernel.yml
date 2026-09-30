@@ -720,6 +720,14 @@ jobs:
           EOF
           echo "✅ Droidspaces support enabled"
 
+      - name: Add LXC user namespace support
+        if: inputs.droidspaces_enable
+        working-directory: kernel_workspace/common
+        run: |
+          echo "Enabling USER_NS for LXC..."
+          echo "CONFIG_USER_NS=y" >> arch/arm64/configs/gki_defconfig
+          echo "✅ LXC user namespace support enabled"
+
       - name: Add IP_SET + IPv6 NAT Support
         if: inputs.ip_set_enable
         working-directory: kernel_workspace/common
