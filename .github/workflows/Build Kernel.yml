@@ -728,7 +728,6 @@ jobs:
           echo "✅ Droidspaces support enabled"
 
       - name: Add LXC user namespace support
-        if: inputs.droidspaces_enable
         working-directory: kernel_workspace/common
         run: |
           echo "Enabling USER_NS for LXC..."
