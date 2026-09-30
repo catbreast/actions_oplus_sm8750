@@ -25,6 +25,7 @@ on:
           - 'SukiSU Ultra'
           - 'KernelSU'
           - 'KernelSU Next'
+          - 'None'
       SUSFS:
         description: 'Enable SuSFS (Enhances hide environment)'
         required: true
@@ -377,6 +378,12 @@ jobs:
           export KSUVER=$(expr 10000 + $KSU_GIT_VERSION + 200)
           echo "KSUVER=$KSUVER" >> $GITHUB_ENV
           echo "✅ KernelSU-Next $(git describe --tags 2>/dev/null || git rev-parse --short HEAD)  (ver $KSUVER)"
+
+      - name: ⚡ No KSU (clean kernel)
+        if: inputs.ksu_type == 'None'
+        run: |
+          echo "KSUVER=NoKSU" >> $GITHUB_ENV
+          echo "✅ Building clean kernel without KSU"
 
       - name: 🔧 Setup Patches
         run: |
