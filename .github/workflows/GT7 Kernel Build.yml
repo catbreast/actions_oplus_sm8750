@@ -11,8 +11,17 @@ name: GT7 (RMX6688) Kernel Build
 
 on:
   workflow_dispatch:
+    inputs:
+      config_mode:
+        description: "stock = 原厂 config 种子；native = 树自带 gki_defconfig（二分诊断，门禁2仅报告）"
+        type: choice
+        options:
+          - stock
+          - native
+        default: stock
 
 env:
+  CONFIG_MODE: ${{ inputs.config_mode }}
   KERNEL_TARGET_RELEASE: "6.6.118-android15-8-ge58033dc8ea6-abogki498046332-4k"
   KERNEL_SUFFIX: "android15-8-ge58033dc8ea6-abogki498046332-4k"
   KERNEL_SRC_ZIP: "https://github.com/OnePlusOSS/android_kernel_oneplus_mt6991/archive/refs/heads/oneplus/mt6991_b_16.0.0_oneplus_ace5_ultra.zip"
@@ -71,11 +80,15 @@ jobs:
           # 配置种子：原厂 .config 原样；版本串写全后缀并关掉 LOCALVERSION_AUTO
           # （zip 源码无 .git，setlocalversion 不会再附加 scm 内容）
           mkdir -p out
-          cp "$GITHUB_WORKSPACE/baserepo/gt7/stock_config.txt" out/.config
-          ./common/scripts/config --file out/.config \
-            --set-str LOCALVERSION "-${KERNEL_SUFFIX}" \
-            --disable LOCALVERSION_AUTO
-          grep -E "^CONFIG_LOCALVERSION" out/.config
+          if [ "$CONFIG_MODE" = "stock" ]; then
+            cp "$GITHUB_WORKSPACE/baserepo/gt7/stock_config.txt" out/.config
+            ./common/scripts/config --file out/.config \
+              --set-str LOCALVERSION "-${KERNEL_SUFFIX}" \
+              --disable LOCALVERSION_AUTO
+            grep -E "^CONFIG_LOCALVERSION" out/.config
+          else
+            echo "native mode: config will be generated from gki_defconfig in the Configure step"
+          fi
           # 生成 abi_symbollist.raw（原厂 config 里 CONFIG_UNUSED_KSYMS_WHITELIST 指向它，
           # kleaf 构建会自动生成，直接 make 没有这个文件会卡在 gki_module_unprotected.h）。
           # 内容 = 官方 KMI 符号表（abi_gki_aarch64.xml）∪ 原厂模块 CRC 清单中的全部符号，
@@ -114,6 +127,12 @@ jobs:
         run: |
           export PATH="$PWD/clang18/bin:$PWD/build-tools/bin:$PATH"
           BUILD_ARGS="ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabihf- CC=clang LD=ld.lld HOSTCC=clang HOSTLD=ld.lld KCFLAGS+=-Wno-error"
+          if [ "$CONFIG_MODE" = "native" ]; then
+            make -C common O=$PWD/out $BUILD_ARGS gki_defconfig
+            ./common/scripts/config --file out/.config \
+              --set-str LOCALVERSION "-${KERNEL_SUFFIX}" \
+              --disable LOCALVERSION_AUTO
+          fi
           make -C common O=$PWD/out $BUILD_ARGS olddefconfig
           echo "=== config drift vs stock (lines only in one side) ===" | tee config-drift.txt
           diff <(grep -E "^CONFIG_|^# CONFIG_" "$GITHUB_WORKSPACE/baserepo/gt7/stock_config.txt" | sort) \
@@ -148,7 +167,7 @@ jobs:
         env:
           STOCK_SYMVERS: ${{ github.workspace }}/baserepo/gt7/stock_symvers.txt
         run: |
-          python3 - "$STOCK_SYMVERS" out/Module.symvers > gate-report.txt 2>&1 <<'PYEOF' || { cat gate-report.txt; exit 1; }
+          python3 - "$STOCK_SYMVERS" out/Module.symvers > gate-report.txt 2>&1 <<'PYEOF' || { cat gate-report.txt; if [ "$CONFIG_MODE" = "native" ]; then echo "::warning::GATE2 mismatch tolerated in native diagnostic mode"; else exit 1; fi; }
           import sys
           stock_path, built_path = sys.argv[1], sys.argv[2]
           stock = {}
@@ -187,9 +206,13 @@ jobs:
           rm -rf AnyKernel3/.git
           cp out/arch/arm64/boot/Image AnyKernel3/Image
           cd AnyKernel3
-          zip -r ../AnyKernel3_GT7_6.6.118_stockcfg.zip ./*
+          if [ "$CONFIG_MODE" = "native" ]; then
+            zip -r ../AnyKernel3_GT7_6.6.118_nativecfg.zip ./*
+          else
+            zip -r ../AnyKernel3_GT7_6.6.118_stockcfg.zip ./*
+          fi
           cd ..
-          ls -la AnyKernel3_GT7_6.6.118_stockcfg.zip
+          ls -la AnyKernel3_GT7_6.6.118_*.zip
 
       - name: Upload artifacts
         if: always()
@@ -197,7 +220,7 @@ jobs:
         with:
           name: GT7-kernel-build
           path: |
-            ws/AnyKernel3_GT7_6.6.118_stockcfg.zip
+            ws/AnyKernel3_GT7_6.6.118_*.zip
             ws/gate-report.txt
             ws/config-drift.txt
             ws/abi_symbollist.raw
