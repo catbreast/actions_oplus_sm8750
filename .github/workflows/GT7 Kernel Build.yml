@@ -18,6 +18,7 @@ on:
         options:
           - stock
           - native
+          - native-mv
         default: stock
 
 env:
@@ -127,11 +128,15 @@ jobs:
         run: |
           export PATH="$PWD/clang18/bin:$PWD/build-tools/bin:$PATH"
           BUILD_ARGS="ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabihf- CC=clang LD=ld.lld HOSTCC=clang HOSTLD=ld.lld KCFLAGS+=-Wno-error"
-          if [ "$CONFIG_MODE" = "native" ]; then
+          if [ "$CONFIG_MODE" != "stock" ]; then
             make -C common O=$PWD/out $BUILD_ARGS gki_defconfig
             ./common/scripts/config --file out/.config \
               --set-str LOCALVERSION "-${KERNEL_SUFFIX}" \
               --disable LOCALVERSION_AUTO
+            if [ "$CONFIG_MODE" = "native-mv" ]; then
+              ./common/scripts/config --file out/.config --enable MODVERSIONS
+              echo "native-mv: MODVERSIONS enabled on top of gki_defconfig"
+            fi
           fi
           make -C common O=$PWD/out $BUILD_ARGS olddefconfig
           echo "=== config drift vs stock (lines only in one side) ===" | tee config-drift.txt
@@ -208,6 +213,8 @@ jobs:
           cd AnyKernel3
           if [ "$CONFIG_MODE" = "native" ]; then
             zip -r ../AnyKernel3_GT7_6.6.118_nativecfg.zip ./*
+          elif [ "$CONFIG_MODE" = "native-mv" ]; then
+            zip -r ../AnyKernel3_GT7_6.6.118_nativeMV.zip ./*
           else
             zip -r ../AnyKernel3_GT7_6.6.118_stockcfg.zip ./*
           fi
@@ -218,6 +225,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
+          include-hidden-files: true
           name: GT7-kernel-build
           path: |
             ws/AnyKernel3_GT7_6.6.118_*.zip
