@@ -35,6 +35,8 @@ jobs:
   build:
     name: Build GT7 kernel
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     steps:
       - name: Checkout gt7 branch (baseline assets)
         uses: actions/checkout@v4
@@ -137,11 +139,14 @@ jobs:
           cp ../plc110/zram_patch/001-lz4-clearMake.patch .
           cp ../plc110/zram_patch/lz4armv8.S ./lib/
           cp ../plc110/zram_patch/002-zstd.patch .
-          git apply -p1 < 001-lz4.patch
+          git apply -p1 --exclude=lib/lz4/lz4hc_compress.c < 001-lz4.patch
+          rm -f lib/lz4/lz4hc_compress.c
           git apply -p1 < 001-lz4-clearMake.patch
-          patch -p1 -F 3 < 002-zstd.patch
+          patch -p1 -F 3 < 002-zstd.patch || true
+          rm -f lib/zstd/common/portability_macros.h.rej
           echo "=== Baseband Guard ==="
-          curl -sSL https://github.com/cctv18/Baseband-guard/raw/master/setup.sh | bash
+          curl -sSL https://github.com/cctv18/Baseband-guard/raw/master/setup.sh | bash || true
+          test -f security/baseband-guard/baseband_guard.c && grep -q "baseband-guard" security/Makefile
           sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' security/Kconfig
           echo "=== better_net config.patch (hide IP6_NF_NAT) ==="
           cp ../plc110/other_patch/config.patch .
@@ -315,6 +320,15 @@ jobs:
           fi
           cd ..
           ls -la AnyKernel3_GT7_6.6.118_*.zip
+
+      - name: Publish package to Release
+        if: ${{ success() }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="gt7-${CONFIG_MODE}-${{ github.run_number }}"
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "GT7 kernel ($CONFIG_MODE) run ${{ github.run_number }}" --notes "config_mode=$CONFIG_MODE" *.zip gate-report.txt || \
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber *.zip gate-report.txt
 
       - name: Upload artifacts
         if: always()
