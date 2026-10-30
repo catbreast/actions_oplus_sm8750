@@ -220,6 +220,73 @@ jobs:
           sed -i "s|.*#define LINUX_COMPILER.*|#define LINUX_COMPILER \"${COMPILER}\"|" ./common/scripts/mkcompile_h
           grep -n "LINUX_COMPILER" ./common/scripts/mkcompile_h | head -2
 
+      - name: Port drivers F2 (ADIOS + Re-Kernel + TCP Brutal + NTFS3)
+        if: ${{ inputs.config_mode == 'full' }}
+        working-directory: ws
+        run: |
+          set -e
+          git clone --depth 1 --branch oneplus/mt6991_v_15.0.2_ace5_ultra_6.6.89 --filter=blob:none --sparse https://github.com/Alhkxsj/android_kernel_oneplus_mt6991 src89
+          git -C src89 sparse-checkout set --no-cone "/block/adios.c" "/block/Kconfig.iosched" "/drivers/rekernel/" "/net/ipv4/tcp_brutal.c" "/net/ipv4/Kconfig"
+          git clone --depth 1 --branch v6.6.118 --filter=blob:none --sparse https://github.com/gregkh/linux upstream
+          git -C upstream sparse-checkout set fs/ntfs3
+          cat > f2_integrate.py <<'PYEOF2'
+          import re, shutil, sys
+          from pathlib import Path
+          common, src89, up = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3])
+          def insert_before_last(text, anchor, block):
+              idx = text.rfind(anchor)
+              assert idx > 0, f"anchor not found: {anchor!r}"
+              return text[:idx] + block + text[idx:]
+          def extract_block(text, start_marker, end_marker):
+              a = text.index(start_marker)
+              b = text.index(end_marker, a)
+              return text[a:b]
+          shutil.copy(src89 / "block/adios.c", common / "block/adios.c")
+          their_iosched = (src89 / "block/Kconfig.iosched").read_text()
+          adios_block = extract_block(their_iosched, "config MQ_IOSCHED_ADIOS", "config IOSCHED_BFQ")
+          our_iosched_p = common / "block/Kconfig.iosched"
+          our_iosched = our_iosched_p.read_text()
+          assert "config IOSCHED_BFQ" in our_iosched and "MQ_IOSCHED_ADIOS" not in our_iosched
+          our_iosched_p.write_text(our_iosched.replace("config IOSCHED_BFQ", adios_block + "config IOSCHED_BFQ", 1))
+          with open(common / "block/Makefile", "a") as f:
+              f.write("\nobj-$(CONFIG_MQ_IOSCHED_ADIOS)\t+= adios.o\n")
+          dst = common / "drivers/rekernel"
+          if dst.exists():
+              shutil.rmtree(dst)
+          shutil.copytree(src89 / "drivers/rekernel", dst)
+          dk_p = common / "drivers/Kconfig"
+          dk = dk_p.read_text()
+          assert "drivers/rekernel/Kconfig" not in dk
+          dk_p.write_text(insert_before_last(dk, "endmenu", 'source "drivers/rekernel/Kconfig"\n\n'))
+          with open(common / "drivers/Makefile", "a") as f:
+              f.write("\nobj-$(CONFIG_REKERNEL)\t\t+= rekernel/\n")
+          shutil.copy(src89 / "net/ipv4/tcp_brutal.c", common / "net/ipv4/tcp_brutal.c")
+          their_k = (src89 / "net/ipv4/Kconfig").read_text()
+          brutal_block = extract_block(their_k, "config TCP_CONG_BRUTAL", "\nchoice")
+          our_k_p = common / "net/ipv4/Kconfig"
+          our_k = our_k_p.read_text()
+          anchor = '\nchoice\n\tprompt "Default TCP congestion control"'
+          assert anchor in our_k and "TCP_CONG_BRUTAL" not in our_k
+          our_k_p.write_text(our_k.replace(anchor, "\n" + brutal_block.rstrip() + "\n" + anchor, 1))
+          with open(common / "net/ipv4/Makefile", "a") as f:
+              f.write("\nobj-$(CONFIG_TCP_CONG_BRUTAL) += tcp_brutal.o\n")
+          dst = common / "fs/ntfs3"
+          if dst.exists():
+              shutil.rmtree(dst)
+          shutil.copytree(up / "fs/ntfs3", dst)
+          for q in ["block/adios.c", "drivers/rekernel/rekernel.c", "net/ipv4/tcp_brutal.c", "fs/ntfs3/super.c"]:
+              assert (common / q).exists(), q
+          print("F2 integration OK")
+          PYEOF2
+          python3 f2_integrate.py common src89 upstream
+          cat >> common/arch/arm64/configs/gki_defconfig <<'EOF'
+          CONFIG_MQ_IOSCHED_ADIOS=y
+          CONFIG_MQ_IOSCHED_DEFAULT_ADIOS=y
+          CONFIG_REKERNEL=y
+          CONFIG_TCP_CONG_BRUTAL=y
+          CONFIG_NTFS3_FS=y
+          EOF
+
       - name: Configure (olddefconfig) and diff vs stock
         working-directory: ws
         run: |
@@ -251,6 +318,15 @@ jobs:
           make -C common O=$PWD/out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabihf- CC="ccache clang" LD=ld.lld HOSTCC="ccache clang" HOSTLD=ld.lld KCFLAGS+=-Wno-error -j$(nproc) Image
           ls -la out/arch/arm64/boot/Image
           ccache -s || true
+
+      - name: Verify F2 configs landed
+        if: ${{ inputs.config_mode == 'full' }}
+        working-directory: ws
+        run: |
+          for sym in MQ_IOSCHED_ADIOS MQ_IOSCHED_DEFAULT_ADIOS REKERNEL TCP_CONG_BRUTAL NTFS3_FS TCP_CONG_BBR IP_SET ZRAM BBG MODVERSIONS; do
+            grep -qx "CONFIG_${sym}=y" out/.config || { echo "MISSING CONFIG_${sym}"; exit 1; }
+          done
+          echo "all feature configs present"
 
       - name: Gate 1 — kernel release string must equal stock
         working-directory: ws
