@@ -1,0 +1,172 @@
+name: GT7 (RMX6688) Kernel Build
+
+# GT7 专属构建（资产在分支 gt7-rmx6688 的 gt7/ 目录）：
+# - 源码：OnePlusOSS MT6991 Android16 分支（6.6.118，与 GT7 现行系统同小版本）
+# - 配置：真机提取的原厂 .config 原样作种子（gt7/stock_config.txt），olddefconfig 收敛
+# - 版本串：强制对齐原厂 6.6.118-android15-8-ge58033dc8ea6-abogki498046332-4k
+# - 门禁1：构建后 kernel.release 必须与原厂逐字一致，否则不打包
+# - 门禁2：新内核导出的每个符号若出现在原厂模块 CRC 清单（gt7/stock_symvers.txt）中，
+#         CRC 必须一致，否则不打包（这是 WiFi 等厂商模块能否加载的判据）
+# - v1 不加任何补丁/KSU：先证明基线兼容，特性后续迭代
+
+on:
+  workflow_dispatch:
+
+env:
+  KERNEL_TARGET_RELEASE: "6.6.118-android15-8-ge58033dc8ea6-abogki498046332-4k"
+  KERNEL_SUFFIX: "android15-8-ge58033dc8ea6-abogki498046332-4k"
+  KERNEL_SRC_ZIP: "https://github.com/OnePlusOSS/android_kernel_oneplus_mt6991/archive/refs/heads/oneplus/mt6991_b_16.0.0_oneplus_ace5_ultra.zip"
+  CLANG_ZIP: "https://github.com/cctv18/oneplus_sm8650_toolchain/releases/download/LLVM-Clang18-r510928/clang-r510928.zip"
+  BUILDTOOLS_ZIP: "https://github.com/cctv18/oneplus_sm8650_toolchain/releases/download/LLVM-Clang18-r510928/build-tools.zip"
+  CCACHE_DIR: "/home/runner/.ccache_gt7"
+
+jobs:
+  build:
+    name: Build GT7 kernel
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout gt7 branch (baseline assets)
+        uses: actions/checkout@v4
+        with:
+          ref: gt7-rmx6688
+          path: baserepo
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h /
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            aria2 ccache curl unzip zip git perl bc bison flex \
+            libssl-dev libelf-dev dwarves python3
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: gt7-ccache-v1
+          restore-keys: gt7-ccache-
+
+      - name: Download kernel source and toolchain
+        run: |
+          mkdir -p ws && cd ws
+          aria2c -s16 -x16 -k1M "$KERNEL_SRC_ZIP" -o common.zip &
+          aria2c -s16 -x16 -k1M "$CLANG_ZIP" -o clang.zip &
+          aria2c -s16 -x16 -k1M "$BUILDTOOLS_ZIP" -o build-tools.zip &
+          wait
+          unzip -q common.zip && mv android_kernel_oneplus_mt6991-* common
+          unzip -q clang.zip -d clang18
+          unzip -q build-tools.zip -d build-tools
+          rm -f common.zip clang.zip build-tools.zip
+          ls common | head
+
+      - name: Prepare source tree
+        working-directory: ws
+        run: |
+          # 去掉 KMI 受保护导出限制（与 cctv18 配方一致，放宽厂商模块可绑定符号集）
+          rm -f common/android/abi_gki_protected_exports_*
+          # 配置种子：原厂 .config 原样；版本串写全后缀并关掉 LOCALVERSION_AUTO
+          # （zip 源码无 .git，setlocalversion 不会再附加 scm 内容）
+          mkdir -p out
+          cp "$GITHUB_WORKSPACE/baserepo/gt7/stock_config.txt" out/.config
+          ./common/scripts/config --file out/.config \
+            --set-str LOCALVERSION "-${KERNEL_SUFFIX}" \
+            --disable LOCALVERSION_AUTO
+          grep -E "^CONFIG_LOCALVERSION" out/.config
+
+      - name: Configure (olddefconfig) and diff vs stock
+        working-directory: ws
+        run: |
+          export PATH="$PWD/clang18/bin:$PWD/build-tools/bin:$PATH"
+          BUILD_ARGS="ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabihf- CC=clang LD=ld.lld HOSTCC=clang HOSTLD=ld.lld KCFLAGS+=-Wno-error"
+          make -C common O=$PWD/out $BUILD_ARGS olddefconfig
+          echo "=== config drift vs stock (lines only in one side) ===" | tee config-drift.txt
+          diff <(grep -E "^CONFIG_|^# CONFIG_" "$GITHUB_WORKSPACE/baserepo/gt7/stock_config.txt" | sort) \
+               <(grep -E "^CONFIG_|^# CONFIG_" out/.config | sort) >> config-drift.txt || true
+          wc -l config-drift.txt
+          grep -E "^CONFIG_LOCALVERSION" out/.config
+
+      - name: Build Image
+        working-directory: ws
+        run: |
+          export PATH="$PWD/clang18/bin:$PWD/build-tools/bin:$PATH"
+          export CCACHE_DIR="${{ env.CCACHE_DIR }}"
+          ccache --set-config=compilercheck=content --set-config=max_size=3G || true
+          make -C common O=$PWD/out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabihf- CC="ccache clang" LD=ld.lld HOSTCC="ccache clang" HOSTLD=ld.lld KCFLAGS+=-Wno-error -j$(nproc) Image
+          ls -la out/arch/arm64/boot/Image
+          ccache -s || true
+
+      - name: Gate 1 — kernel release string must equal stock
+        working-directory: ws
+        run: |
+          REL="$(cat out/include/config/kernel.release)"
+          echo "built release: $REL"
+          echo "target       : $KERNEL_TARGET_RELEASE"
+          if [ "$REL" != "$KERNEL_TARGET_RELEASE" ]; then
+            echo "::error::kernel.release mismatch — refusing to package"
+            exit 1
+          fi
+          echo "GATE1 PASS"
+
+      - name: Gate 2 — exported symbol CRCs vs stock module list
+        working-directory: ws
+        env:
+          STOCK_SYMVERS: ${{ github.workspace }}/baserepo/gt7/stock_symvers.txt
+        run: |
+          python3 - "$STOCK_SYMVERS" out/Module.symvers > gate-report.txt 2>&1 <<'PYEOF' || { cat gate-report.txt; exit 1; }
+          import sys
+          stock_path, built_path = sys.argv[1], sys.argv[2]
+          stock = {}
+          with open(stock_path) as f:
+              for line in f:
+                  p = line.rstrip("\n").split("\t")
+                  if len(p) >= 2:
+                      stock[p[1]] = p[0].lower()
+          built = {}
+          with open(built_path) as f:
+              for line in f:
+                  p = line.rstrip("\n").split("\t")
+                  if len(p) >= 2:
+                      built[p[1]] = p[0].lower()
+          overlap = [s for s in built if s in stock]
+          mismatch = [(s, stock[s], built[s]) for s in overlap if stock[s] != built[s]]
+          missing = [s for s in stock if s not in built]
+          print(f"built exports: {len(built)}")
+          print(f"stock module symbol CRCs: {len(stock)}")
+          print(f"overlap compared: {len(overlap)}")
+          print(f"CRC mismatches: {len(mismatch)}")
+          for s, a, b in mismatch[:80]:
+              print(f"  MISMATCH {s}: stock={a} built={b}")
+          print(f"stock symbols not exported by built vmlinux: {len(missing)} (mostly module-to-module, informational)")
+          if mismatch:
+              print("GATE2 FAIL")
+              sys.exit(1)
+          print("GATE2 PASS")
+          PYEOF
+          cat gate-report.txt
+
+      - name: Package AnyKernel3
+        working-directory: ws
+        run: |
+          git clone --depth=1 https://github.com/palazik/AnyKernel3
+          rm -rf AnyKernel3/.git
+          cp out/arch/arm64/boot/Image AnyKernel3/Image
+          cd AnyKernel3
+          zip -r ../AnyKernel3_GT7_6.6.118_stockcfg.zip ./*
+          cd ..
+          ls -la AnyKernel3_GT7_6.6.118_stockcfg.zip
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: GT7-kernel-build
+          path: |
+            ws/AnyKernel3_GT7_6.6.118_stockcfg.zip
+            ws/gate-report.txt
+            ws/config-drift.txt
+            ws/out/.config
+            ws/out/include/config/kernel.release
+          if-no-files-found: warn
