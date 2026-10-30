@@ -172,7 +172,10 @@ jobs:
         env:
           STOCK_SYMVERS: ${{ github.workspace }}/baserepo/gt7/stock_symvers.txt
         run: |
-          python3 - "$STOCK_SYMVERS" out/Module.symvers > gate-report.txt 2>&1 <<'PYEOF' || { cat gate-report.txt; if [ "$CONFIG_MODE" = "native" ]; then echo "::warning::GATE2 mismatch tolerated in native diagnostic mode"; else exit 1; fi; }
+          BUILT_SYMVERS=out/Module.symvers
+          [ -f "$BUILT_SYMVERS" ] || BUILT_SYMVERS=out/vmlinux.symvers
+          echo "gate2 reading: $BUILT_SYMVERS"
+          python3 - "$STOCK_SYMVERS" "$BUILT_SYMVERS" > gate-report.txt 2>&1 <<'PYEOF' || { cat gate-report.txt; if [ "$CONFIG_MODE" = "native" ]; then echo "::warning::GATE2 mismatch tolerated in native diagnostic mode"; else exit 1; fi; }
           import sys
           stock_path, built_path = sys.argv[1], sys.argv[2]
           stock = {}
