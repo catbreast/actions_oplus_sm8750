@@ -76,6 +76,38 @@ jobs:
             --set-str LOCALVERSION "-${KERNEL_SUFFIX}" \
             --disable LOCALVERSION_AUTO
           grep -E "^CONFIG_LOCALVERSION" out/.config
+          # 生成 abi_symbollist.raw（原厂 config 里 CONFIG_UNUSED_KSYMS_WHITELIST 指向它，
+          # kleaf 构建会自动生成，直接 make 没有这个文件会卡在 gki_module_unprotected.h）。
+          # 内容 = 官方 KMI 符号表（abi_gki_aarch64.xml）∪ 原厂模块 CRC 清单中的全部符号，
+          # 保证厂商模块需要的导出符号不会被 TRIM_UNUSED_KSYMS 裁掉。
+          python3 - "$GITHUB_WORKSPACE/baserepo/gt7/stock_symvers.txt" common/android/abi_gki_aarch64.xml abi_symbollist.raw <<'PYEOF'
+          import re, sys
+          symvers_path, xml_path, out_path = sys.argv[1], sys.argv[2], sys.argv[3]
+          syms = set()
+          with open(symvers_path) as f:
+              for line in f:
+                  p = line.rstrip("\n").split("\t")
+                  if len(p) >= 2:
+                      syms.add(p[1])
+          n_stock = len(syms)
+          n_xml = 0
+          try:
+              with open(xml_path) as f:
+                  xml = f.read()
+              for m in re.finditer(r'<symbol name="([^"]+)"', xml):
+                  if m.group(1) not in syms:
+                      n_xml += 1
+                  syms.add(m.group(1))
+          except FileNotFoundError:
+              print(f"WARNING: {xml_path} not found, using stock symvers only")
+          with open(out_path, "w") as f:
+              for s in sorted(syms):
+                  f.write(s + "\n")
+          print(f"abi_symbollist.raw: {len(syms)} symbols (stock {n_stock} + xml-only {n_xml})")
+          PYEOF
+          cp abi_symbollist.raw out/abi_symbollist.raw
+          cp abi_symbollist.raw common/abi_symbollist.raw
+          wc -l abi_symbollist.raw
 
       - name: Configure (olddefconfig) and diff vs stock
         working-directory: ws
@@ -168,6 +200,7 @@ jobs:
             ws/AnyKernel3_GT7_6.6.118_stockcfg.zip
             ws/gate-report.txt
             ws/config-drift.txt
+            ws/abi_symbollist.raw
             ws/out/.config
             ws/out/include/config/kernel.release
           if-no-files-found: warn
