@@ -19,6 +19,7 @@ on:
           - stock
           - native
           - native-mv
+          - full
         default: stock
 
 env:
@@ -52,6 +53,123 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             aria2 ccache curl unzip zip git perl bc bison flex \
             libssl-dev libelf-dev dwarves python3 gcc-aarch64-linux-gnu
+
+      - name: Apply feature pack F1 (BakaSU + SUSFS + lz4/zstd + BBG)
+        if: ${{ inputs.config_mode == 'full' }}
+        working-directory: kernel_workspace
+        run: |
+          set -e
+          exec > >(tee ../f1-report.txt) 2>&1
+          git clone --depth=1 https://github.com/Alhkxsj/oplus_kernel_plc110 plc110
+          echo "=== BakaSU ==="
+          curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/refs/heads/main/kernel/setup.sh" | bash -s main
+          echo 'CONFIG_KSU_FULL_NAME_FORMAT="%TAG_NAME%-%COMMIT_SHA%@cctv18"' >> ./common/arch/arm64/configs/gki_defconfig
+          echo "=== SUSFS ==="
+          git clone --depth=1 https://github.com/cctv18/susfs4oki.git susfs4ksu -b oki-android15-6.6
+          cp ./susfs4ksu/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch ./common/
+          cp ./susfs4ksu/kernel_patches/fs/* ./common/fs/
+          cp ./susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
+          cp ./plc110/other_patch/69_hide_stuff.patch ./common/
+          cd ./common
+          patch -p1 -F 3 < 50_add_susfs_in_gki-android15-6.6.patch
+          patch -p1 -N -F 3 < 69_hide_stuff.patch
+          echo "=== lz4 1.10.0 + zstd 1.5.7 ==="
+          cp ../plc110/zram_patch/001-lz4.patch .
+          cp ../plc110/zram_patch/001-lz4-clearMake.patch .
+          cp ../plc110/zram_patch/lz4armv8.S ./lib/
+          cp ../plc110/zram_patch/002-zstd.patch .
+          git apply -p1 < 001-lz4.patch
+          git apply -p1 < 001-lz4-clearMake.patch
+          patch -p1 -F 3 < 002-zstd.patch
+          echo "=== Baseband Guard ==="
+          curl -sSL https://github.com/cctv18/Baseband-guard/raw/master/setup.sh | bash
+          sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' security/Kconfig
+          echo "=== better_net config.patch (hide IP6_NF_NAT) ==="
+          cp ../plc110/other_patch/config.patch .
+          patch -p1 -F 3 < config.patch
+          echo "=== reject check ==="
+          REJ=$(find . -name '*.rej' | head -20)
+          if [ -n "$REJ" ]; then echo "PATCH REJECTS FOUND:"; echo "$REJ"; for f in $REJ; do echo "----- $f"; cat "$f"; done; exit 1; fi
+          echo "F1 patches applied cleanly"
+
+      - name: Feature configs F1
+        if: ${{ inputs.config_mode == 'full' }}
+        working-directory: kernel_workspace
+        run: |
+          DEF=./common/arch/arm64/configs/gki_defconfig
+          cat >> $DEF <<'EOF'
+          CONFIG_KSU_SUSFS=y
+          CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y
+          CONFIG_KSU_SUSFS_SUS_PATH=y
+          CONFIG_KSU_SUSFS_SUS_MOUNT=y
+          CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y
+          CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y
+          CONFIG_KSU_SUSFS_SUS_KSTAT=y
+          CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=n
+          CONFIG_KSU_SUSFS_SPOOF_UNAME=y
+          CONFIG_KSU_SUSFS_ENABLE_LOG=y
+          CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
+          CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
+          CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
+          CONFIG_KSU_SUSFS_SUS_MAP=y
+          CONFIG_KSU=y
+          CONFIG_TMPFS_XATTR=y
+          CONFIG_TMPFS_POSIX_ACL=y
+          CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y
+          CONFIG_HEADERS_INSTALL=n
+          CONFIG_TCP_CONG_ADVANCED=y
+          CONFIG_TCP_CONG_BBR=y
+          CONFIG_TCP_CONG_CUBIC=y
+          CONFIG_TCP_CONG_VEGAS=y
+          CONFIG_TCP_CONG_NV=y
+          CONFIG_TCP_CONG_WESTWOOD=y
+          CONFIG_TCP_CONG_HTCP=y
+          CONFIG_DEFAULT_TCP_CONG="cubic"
+          CONFIG_NETFILTER_XT_MATCH_ADDRTYPE=y
+          CONFIG_NETFILTER_XT_SET=y
+          CONFIG_IP_SET=y
+          CONFIG_IP_SET_MAX=65534
+          CONFIG_IP_SET_BITMAP_IP=y
+          CONFIG_IP_SET_BITMAP_IPMAC=y
+          CONFIG_IP_SET_BITMAP_PORT=y
+          CONFIG_IP_SET_HASH_IP=y
+          CONFIG_IP_SET_HASH_IPMARK=y
+          CONFIG_IP_SET_HASH_IPPORT=y
+          CONFIG_IP_SET_HASH_IPPORTIP=y
+          CONFIG_IP_SET_HASH_IPPORTNET=y
+          CONFIG_IP_SET_HASH_IPMAC=y
+          CONFIG_IP_SET_HASH_MAC=y
+          CONFIG_IP_SET_HASH_NETPORTNET=y
+          CONFIG_IP_SET_HASH_NET=y
+          CONFIG_IP_SET_HASH_NETNET=y
+          CONFIG_IP_SET_HASH_NETPORT=y
+          CONFIG_IP_SET_HASH_NETIFACE=y
+          CONFIG_IP_SET_LIST_SET=y
+          CONFIG_IP6_NF_NAT=y
+          CONFIG_IP6_NF_TARGET_MASQUERADE=y
+          CONFIG_BBG=y
+          CONFIG_ZRAM=y
+          EOF
+          echo "feature configs appended: $(grep -c '^CONFIG_' $DEF) total CONFIG lines"
+
+      - name: Spoof /proc/version identity (full)
+        if: ${{ inputs.config_mode == 'full' }}
+        working-directory: kernel_workspace
+        run: |
+          {
+            echo "KBUILD_BUILD_USER<<EOF"
+            echo "kleaf"
+            echo "EOF"
+            echo "KBUILD_BUILD_HOST<<EOF"
+            echo "build-host"
+            echo "EOF"
+            echo "KBUILD_BUILD_VERSION<<EOF"
+            echo "1"
+            echo "EOF"
+          } >> $GITHUB_ENV
+          COMPILER='Android (11368308, +pgo, +bolt, +lto, +mlgo, based on r510928) clang version 18.0.0 (https://android.googlesource.com/toolchain/llvm-project 477610d4d0d988e69dbc3fae4fe86bff3f07f2b5), LLD 18.0.0'
+          sed -i "s|.*#define LINUX_COMPILER.*|#define LINUX_COMPILER \"${COMPILER}\"|" ./common/scripts/mkcompile_h
+          grep -n "LINUX_COMPILER" ./common/scripts/mkcompile_h | head -2
 
       - name: Restore ccache
         uses: actions/cache@v4
