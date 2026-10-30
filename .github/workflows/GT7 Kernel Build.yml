@@ -287,6 +287,45 @@ jobs:
           CONFIG_NTFS3_FS=y
           EOF
 
+      - name: Droidspaces F3 (extend)
+        if: ${{ inputs.config_mode == 'full' }}
+        working-directory: ws
+        run: |
+          set -e
+          exec > >(tee f3-report.txt) 2>&1
+          cd common
+          patch -p1 -F 3 < ../plc110/droidspaces_patch/fix_sysvipc_kabi_6_7_8.patch
+          patch -p1 -F 3 < ../plc110/droidspaces_patch/fix_oplus_bsp_midas.patch
+          patch -p1 -F 3 < ../plc110/droidspaces_patch/ntsync_base.patch || true
+          patch -p1 -F 3 < ../plc110/droidspaces_patch/ntsync_compat_android15-6.6.patch || true
+          patch -p1 -F 3 < ../plc110/droidspaces_patch/fix_cgroup_limits_kabi_6.6.89.patch
+          patch -p1 -F 3 < ../plc110/droidspaces_patch/evdi_drm.patch || true
+          REJ=$(find . -name '*.rej' | head -20)
+          if [ -n "$REJ" ]; then echo "PATCH REJECTS FOUND:"; echo "$REJ"; for f in $REJ; do echo "----- $f"; cat "$f"; done; exit 1; fi
+          echo "F3 patches applied cleanly"
+          cd ..
+          cat >> common/arch/arm64/configs/gki_defconfig <<'EOF'
+          CONFIG_PID_NS=y
+          CONFIG_IPC_NS=y
+          CONFIG_USER_NS=y
+          CONFIG_SYSVIPC=y
+          CONFIG_DEVTMPFS=y
+          CONFIG_NAMESPACES=y
+          CONFIG_POSIX_MQUEUE=y
+          CONFIG_NETFILTER_XT_TARGET_LOG=y
+          CONFIG_NETFILTER_XT_MATCH_RECENT=y
+          CONFIG_NTSYNC=y
+          CONFIG_MACVLAN=y
+          CONFIG_UNIX_DIAG=y
+          CONFIG_PROC_CHILDREN=y
+          CONFIG_FAIR_GROUP_SCHED=y
+          CONFIG_CFS_BANDWIDTH=y
+          CONFIG_CGROUP_PIDS=y
+          CONFIG_BT_HCIVHCI=y
+          CONFIG_STATIC_USERMODEHELPER=n
+          CONFIG_DRM_LINDROID_EVDI=y
+          EOF
+
       - name: Configure (olddefconfig) and diff vs stock
         working-directory: ws
         run: |
@@ -323,7 +362,7 @@ jobs:
         if: ${{ inputs.config_mode == 'full' }}
         working-directory: ws
         run: |
-          for sym in MQ_IOSCHED_ADIOS MQ_IOSCHED_DEFAULT_ADIOS REKERNEL TCP_CONG_BRUTAL NTFS3_FS TCP_CONG_BBR IP_SET ZRAM BBG MODVERSIONS; do
+          for sym in MQ_IOSCHED_ADIOS MQ_IOSCHED_DEFAULT_ADIOS REKERNEL TCP_CONG_BRUTAL NTFS3_FS TCP_CONG_BBR IP_SET ZRAM BBG MODVERSIONS CFS_BANDWIDTH CGROUP_PIDS FAIR_GROUP_SCHED USER_NS SYSVIPC NTSYNC DRM_LINDROID_EVDI MACVLAN UNIX_DIAG PROC_CHILDREN MEMCG PID_NS IPC_NS NAMESPACES; do
             grep -qx "CONFIG_${sym}=y" out/.config || { echo "MISSING CONFIG_${sym}"; exit 1; }
           done
           echo "all feature configs present"
@@ -419,6 +458,7 @@ jobs:
             ws/AnyKernel3_GT7_6.6.118_*.zip
             ws/gate-report.txt
             ws/f1-report.txt
+            ws/f3-report.txt
             ws/config-drift.txt
             ws/abi_symbollist.raw
             ws/out/.config
