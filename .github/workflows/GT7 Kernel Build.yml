@@ -54,6 +54,76 @@ jobs:
             aria2 ccache curl unzip zip git perl bc bison flex \
             libssl-dev libelf-dev dwarves python3 gcc-aarch64-linux-gnu
 
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: gt7-ccache-v2
+          restore-keys: gt7-ccache-v2-
+
+      - name: Download kernel source and toolchain
+        run: |
+          mkdir -p ws && cd ws
+          aria2c -s16 -x16 -k1M "$KERNEL_SRC_ZIP" -o common.zip &
+          aria2c -s16 -x16 -k1M "$CLANG_ZIP" -o clang.zip &
+          aria2c -s16 -x16 -k1M "$BUILDTOOLS_ZIP" -o build-tools.zip &
+          wait
+          unzip -q common.zip && mv android_kernel_oneplus_mt6991-* common
+          unzip -q clang.zip -d clang18
+          unzip -q build-tools.zip -d build-tools
+          rm -f common.zip clang.zip build-tools.zip
+          ls common | head
+
+      - name: Prepare source tree
+        working-directory: ws
+        run: |
+          # 去掉 KMI 受保护导出限制（与 cctv18 配方一致，放宽厂商模块可绑定符号集）
+          rm -f common/android/abi_gki_protected_exports_*
+          # 配置种子：原厂 .config 原样；版本串写全后缀并关掉 LOCALVERSION_AUTO
+          # （zip 源码无 .git，setlocalversion 不会再附加 scm 内容）
+          mkdir -p out
+          if [ "$CONFIG_MODE" = "stock" ]; then
+            cp "$GITHUB_WORKSPACE/baserepo/gt7/stock_config.txt" out/.config
+            ./common/scripts/config --file out/.config \
+              --set-str LOCALVERSION "-${KERNEL_SUFFIX}" \
+              --disable LOCALVERSION_AUTO
+            grep -E "^CONFIG_LOCALVERSION" out/.config
+          else
+            echo "native mode: config will be generated from gki_defconfig in the Configure step"
+          fi
+          # 生成 abi_symbollist.raw（原厂 config 里 CONFIG_UNUSED_KSYMS_WHITELIST 指向它，
+          # kleaf 构建会自动生成，直接 make 没有这个文件会卡在 gki_module_unprotected.h）。
+          # 内容 = 官方 KMI 符号表（abi_gki_aarch64.xml）∪ 原厂模块 CRC 清单中的全部符号，
+          # 保证厂商模块需要的导出符号不会被 TRIM_UNUSED_KSYMS 裁掉。
+          python3 - "$GITHUB_WORKSPACE/baserepo/gt7/stock_symvers.txt" common/android/abi_gki_aarch64.xml abi_symbollist.raw <<'PYEOF'
+          import re, sys
+          symvers_path, xml_path, out_path = sys.argv[1], sys.argv[2], sys.argv[3]
+          syms = set()
+          with open(symvers_path) as f:
+              for line in f:
+                  p = line.rstrip("\n").split("\t")
+                  if len(p) >= 2:
+                      syms.add(p[1])
+          n_stock = len(syms)
+          n_xml = 0
+          try:
+              with open(xml_path) as f:
+                  xml = f.read()
+              for m in re.finditer(r'<symbol name="([^"]+)"', xml):
+                  if m.group(1) not in syms:
+                      n_xml += 1
+                  syms.add(m.group(1))
+          except FileNotFoundError:
+              print(f"WARNING: {xml_path} not found, using stock symvers only")
+          with open(out_path, "w") as f:
+              for s in sorted(syms):
+                  f.write(s + "\n")
+          print(f"abi_symbollist.raw: {len(syms)} symbols (stock {n_stock} + xml-only {n_xml})")
+          PYEOF
+          cp abi_symbollist.raw out/abi_symbollist.raw
+          cp abi_symbollist.raw common/abi_symbollist.raw
+          wc -l abi_symbollist.raw
+
       - name: Apply feature pack F1 (lz4/zstd + BBG)
         if: ${{ inputs.config_mode == 'full' }}
         working-directory: kernel_workspace
@@ -144,76 +214,6 @@ jobs:
           COMPILER='Android (11368308, +pgo, +bolt, +lto, +mlgo, based on r510928) clang version 18.0.0 (https://android.googlesource.com/toolchain/llvm-project 477610d4d0d988e69dbc3fae4fe86bff3f07f2b5), LLD 18.0.0'
           sed -i "s|.*#define LINUX_COMPILER.*|#define LINUX_COMPILER \"${COMPILER}\"|" ./common/scripts/mkcompile_h
           grep -n "LINUX_COMPILER" ./common/scripts/mkcompile_h | head -2
-
-      - name: Restore ccache
-        uses: actions/cache@v4
-        with:
-          path: ${{ env.CCACHE_DIR }}
-          key: gt7-ccache-v2
-          restore-keys: gt7-ccache-v2-
-
-      - name: Download kernel source and toolchain
-        run: |
-          mkdir -p ws && cd ws
-          aria2c -s16 -x16 -k1M "$KERNEL_SRC_ZIP" -o common.zip &
-          aria2c -s16 -x16 -k1M "$CLANG_ZIP" -o clang.zip &
-          aria2c -s16 -x16 -k1M "$BUILDTOOLS_ZIP" -o build-tools.zip &
-          wait
-          unzip -q common.zip && mv android_kernel_oneplus_mt6991-* common
-          unzip -q clang.zip -d clang18
-          unzip -q build-tools.zip -d build-tools
-          rm -f common.zip clang.zip build-tools.zip
-          ls common | head
-
-      - name: Prepare source tree
-        working-directory: ws
-        run: |
-          # 去掉 KMI 受保护导出限制（与 cctv18 配方一致，放宽厂商模块可绑定符号集）
-          rm -f common/android/abi_gki_protected_exports_*
-          # 配置种子：原厂 .config 原样；版本串写全后缀并关掉 LOCALVERSION_AUTO
-          # （zip 源码无 .git，setlocalversion 不会再附加 scm 内容）
-          mkdir -p out
-          if [ "$CONFIG_MODE" = "stock" ]; then
-            cp "$GITHUB_WORKSPACE/baserepo/gt7/stock_config.txt" out/.config
-            ./common/scripts/config --file out/.config \
-              --set-str LOCALVERSION "-${KERNEL_SUFFIX}" \
-              --disable LOCALVERSION_AUTO
-            grep -E "^CONFIG_LOCALVERSION" out/.config
-          else
-            echo "native mode: config will be generated from gki_defconfig in the Configure step"
-          fi
-          # 生成 abi_symbollist.raw（原厂 config 里 CONFIG_UNUSED_KSYMS_WHITELIST 指向它，
-          # kleaf 构建会自动生成，直接 make 没有这个文件会卡在 gki_module_unprotected.h）。
-          # 内容 = 官方 KMI 符号表（abi_gki_aarch64.xml）∪ 原厂模块 CRC 清单中的全部符号，
-          # 保证厂商模块需要的导出符号不会被 TRIM_UNUSED_KSYMS 裁掉。
-          python3 - "$GITHUB_WORKSPACE/baserepo/gt7/stock_symvers.txt" common/android/abi_gki_aarch64.xml abi_symbollist.raw <<'PYEOF'
-          import re, sys
-          symvers_path, xml_path, out_path = sys.argv[1], sys.argv[2], sys.argv[3]
-          syms = set()
-          with open(symvers_path) as f:
-              for line in f:
-                  p = line.rstrip("\n").split("\t")
-                  if len(p) >= 2:
-                      syms.add(p[1])
-          n_stock = len(syms)
-          n_xml = 0
-          try:
-              with open(xml_path) as f:
-                  xml = f.read()
-              for m in re.finditer(r'<symbol name="([^"]+)"', xml):
-                  if m.group(1) not in syms:
-                      n_xml += 1
-                  syms.add(m.group(1))
-          except FileNotFoundError:
-              print(f"WARNING: {xml_path} not found, using stock symvers only")
-          with open(out_path, "w") as f:
-              for s in sorted(syms):
-                  f.write(s + "\n")
-          print(f"abi_symbollist.raw: {len(syms)} symbols (stock {n_stock} + xml-only {n_xml})")
-          PYEOF
-          cp abi_symbollist.raw out/abi_symbollist.raw
-          cp abi_symbollist.raw common/abi_symbollist.raw
-          wc -l abi_symbollist.raw
 
       - name: Configure (olddefconfig) and diff vs stock
         working-directory: ws
