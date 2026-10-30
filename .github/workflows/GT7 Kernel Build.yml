@@ -128,10 +128,10 @@ jobs:
 
       - name: Apply feature pack F1 (lz4/zstd + BBG)
         if: ${{ inputs.config_mode == 'full' }}
-        working-directory: kernel_workspace
+        working-directory: ws
         run: |
           set -e
-          exec > >(tee ../f1-report.txt) 2>&1
+          exec > >(tee f1-report.txt) 2>&1
           git clone --depth=1 https://github.com/Alhkxsj/oplus_kernel_plc110 plc110
           cd ./common
           echo "=== lz4 1.10.0 + zstd 1.5.7 ==="
@@ -158,7 +158,7 @@ jobs:
 
       - name: Feature configs F1
         if: ${{ inputs.config_mode == 'full' }}
-        working-directory: kernel_workspace
+        working-directory: ws
         run: |
           DEF=./common/arch/arm64/configs/gki_defconfig
           cat >> $DEF <<'EOF'
@@ -203,7 +203,7 @@ jobs:
 
       - name: Spoof /proc/version identity (full)
         if: ${{ inputs.config_mode == 'full' }}
-        working-directory: kernel_workspace
+        working-directory: ws
         run: |
           {
             echo "KBUILD_BUILD_USER<<EOF"
@@ -315,6 +315,8 @@ jobs:
             zip -r ../AnyKernel3_GT7_6.6.118_nativecfg.zip ./*
           elif [ "$CONFIG_MODE" = "native-mv" ]; then
             zip -r ../AnyKernel3_GT7_6.6.118_nativeMV.zip ./*
+          elif [ "$CONFIG_MODE" = "full" ]; then
+            zip -r ../AnyKernel3_GT7_6.6.118_full.zip ./*
           else
             zip -r ../AnyKernel3_GT7_6.6.118_stockcfg.zip ./*
           fi
@@ -323,6 +325,7 @@ jobs:
 
       - name: Publish package to Release
         if: ${{ success() }}
+        working-directory: ws
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -339,6 +342,7 @@ jobs:
           path: |
             ws/AnyKernel3_GT7_6.6.118_*.zip
             ws/gate-report.txt
+            ws/f1-report.txt
             ws/config-drift.txt
             ws/abi_symbollist.raw
             ws/out/.config
