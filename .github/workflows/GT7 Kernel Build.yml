@@ -41,7 +41,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             aria2 ccache curl unzip zip git perl bc bison flex \
-            libssl-dev libelf-dev dwarves python3
+            libssl-dev libelf-dev dwarves python3 gcc-aarch64-linux-gnu
 
       - name: Restore ccache
         uses: actions/cache@v4
@@ -94,7 +94,7 @@ jobs:
         run: |
           export PATH="$PWD/clang18/bin:$PWD/build-tools/bin:$PATH"
           export CCACHE_DIR="${{ env.CCACHE_DIR }}"
-          ccache --set-config=compilercheck=content --set-config=max_size=3G || true
+          export CCACHE_MAXSIZE=3G
           make -C common O=$PWD/out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabihf- CC="ccache clang" LD=ld.lld HOSTCC="ccache clang" HOSTLD=ld.lld KCFLAGS+=-Wno-error -j$(nproc) Image
           ls -la out/arch/arm64/boot/Image
           ccache -s || true
@@ -160,6 +160,7 @@ jobs:
           ls -la AnyKernel3_GT7_6.6.118_stockcfg.zip
 
       - name: Upload artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: GT7-kernel-build
