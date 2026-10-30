@@ -47,8 +47,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: gt7-ccache-v1
-          restore-keys: gt7-ccache-
+          key: gt7-ccache-v2
+          restore-keys: gt7-ccache-v2-
 
       - name: Download kernel source and toolchain
         run: |
